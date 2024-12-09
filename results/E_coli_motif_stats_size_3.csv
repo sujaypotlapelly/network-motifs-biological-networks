@@ -1,0 +1,2 @@
+motif,real,mean_rand,std_rand,z_score,p_value,p_value_corrected,significant
+632b95bb24dd72fddf872c94842bf6a1,10000,9995.4,9.2,0.5000000000000396,0.8,0.8,False

@@ -13,14 +13,13 @@ import random
 from tqdm import tqdm
 from networkx.algorithms import isomorphism
 from statsmodels.stats.multitest import multipletests
-import hashlib
 
 def setup_logging():
     """
     Configure logging to display time, level, and message.
     """
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.INFO,  # Change to DEBUG for detailed logs
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
             logging.StreamHandler()
@@ -47,7 +46,7 @@ def load_network(file_path, network_type='directed', has_regulation=False):
     logging.info(f"Loading network from {file_path}...")
     with open(file_path, 'r') as f:
         for line_num, line in enumerate(f, 1):
-            parts = line.strip().split('\t')
+            parts = line.strip().split('\t')  # Ensure tab-delimited
             if has_regulation:
                 if len(parts) < 3:
                     logging.warning(f"Line {line_num} is malformed: {line.strip()}")
@@ -61,39 +60,40 @@ def load_network(file_path, network_type='directed', has_regulation=False):
                 regulator, target = parts[:2]
                 G.add_edge(regulator, target)
     logging.info(f"Loaded network '{file_path}' with {G.number_of_nodes()} nodes and {G.number_of_edges()} edges.")
+
+    # Debugging: Log sample nodes and edges
+    if G.number_of_nodes() > 0:
+        sample_nodes = list(G.nodes)[:5]
+        sample_edges = list(G.edges)[:5]
+        logging.info(f"Sample nodes: {sample_nodes}")
+        logging.info(f"Sample edges: {sample_edges}")
+    else:
+        logging.error("The graph has no nodes. Please check the input file format.")
+
     return G
 
 def get_canonical_form(subgraph):
     """
-    Get a canonical string representation of a subgraph using graph isomorphism.
+    Get a canonical string representation of a subgraph, including regulation types.
 
     Parameters:
     - subgraph (networkx.Graph): The subgraph.
 
     Returns:
-    - str: Canonical string representation.
+    - str: Canonical string representation including regulation.
     """
-    # Choose the appropriate matcher based on graph type
-    if subgraph.is_directed():
-        gm = isomorphism.DiGraphMatcher
-    else:
-        gm = isomorphism.GraphMatcher
-
-    # Generate a canonical label by finding the smallest adjacency matrix representation
-    # This is a simple hashing approach; for large motifs, consider more efficient methods
     nodes = sorted(subgraph.nodes())
     mapping = {node: i for i, node in enumerate(nodes)}
     relabeled = nx.relabel_nodes(subgraph, mapping)
-    # Generate a sorted tuple of edges
+    
     if subgraph.is_directed():
-        edge_list = sorted(relabeled.edges())
-        edge_str = ''.join([f"{u}->{v};" for u, v in edge_list])
+        edge_list = sorted(relabeled.edges(data=True))
+        edge_str = ';'.join([f"{u}->{v}:{d.get('regulation', '')}" for u, v, d in edge_list])
     else:
-        edge_list = sorted(relabeled.edges())
-        edge_str = ''.join([f"{u}-{v};" for u, v in edge_list])
-    # Hash the edge string to ensure a fixed-length unique identifier
-    canonical_hash = hashlib.md5(edge_str.encode()).hexdigest()
-    return canonical_hash
+        edge_list = sorted(relabeled.edges(data=True))
+        edge_str = ';'.join([f"{u}-{v}:{d.get('regulation', '')}" for u, v, d in edge_list])
+    
+    return edge_str  # Returns edge string including regulation
 
 def count_motif_batch(subgraph_batch, network_type='directed'):
     """
@@ -104,17 +104,21 @@ def count_motif_batch(subgraph_batch, network_type='directed'):
     - network_type (str): 'directed' or 'undirected'.
 
     Returns:
-    - dict: Counts of each canonical motif in the batch.
+    - dict: Counts of each canonical motif.
     """
     motif_counts = {}
     for sg in subgraph_batch:
+        num_edges = sg.number_of_edges()
+        if num_edges not in [2, 3]:
+            logging.warning(f"Subgraph has unexpected number of edges: {num_edges}")
+            continue
         cf = get_canonical_form(sg)
         motif_counts[cf] = motif_counts.get(cf, 0) + 1
     return motif_counts
 
 def sample_connected_subgraphs_size_3(G, num_samples):
     """
-    Efficiently sample connected 3-node subgraphs by growing from a random node.
+    Sample connected 3-node subgraphs using a balanced random walk method to ensure diversity.
 
     Parameters:
     - G (networkx.Graph): The input graph.
@@ -123,18 +127,34 @@ def sample_connected_subgraphs_size_3(G, num_samples):
     Yields:
     - networkx.Graph: Connected 3-node subgraphs.
     """
-    logging.info(f"Sampling {num_samples} connected 3-node subgraphs using efficient method...")
+    logging.info(f"Sampling {num_samples} connected 3-node subgraphs using balanced random walk method...")
     sampled = 0
+    nodes = list(G.nodes)
+    
     with tqdm(total=num_samples, desc="Sampling Connected Subgraphs") as pbar:
         while sampled < num_samples:
-            # Randomly choose a starting node
-            node = random.choice(list(G.nodes))
+            # Start with a random node
+            node = random.choice(nodes)
             neighbors = list(G.successors(node)) if G.is_directed() else list(G.neighbors(node))
-            if len(neighbors) < 2:
-                continue  # Not enough neighbors to form a 3-node connected subgraph
-            # Randomly select two distinct neighbors
-            neighbor1, neighbor2 = random.sample(neighbors, 2)
-            sub_nodes = [node, neighbor1, neighbor2]
+            if not neighbors:
+                continue
+            # Choose a random neighbor
+            neighbor = random.choice(neighbors)
+            
+            # Decide randomly to choose a node connected to node or to neighbor
+            if random.random() < 0.5:
+                # Sample star-like subgraph
+                connected_nodes = list(G.successors(node)) if G.is_directed() else list(G.neighbors(node))
+            else:
+                # Sample path-like subgraph
+                connected_nodes = list(G.successors(neighbor)) if G.is_directed() else list(G.neighbors(neighbor))
+            
+            # Exclude the original node and neighbor to avoid duplication
+            connected_nodes = list(set(connected_nodes) - {node, neighbor})
+            if not connected_nodes:
+                continue
+            new_node = random.choice(connected_nodes)
+            sub_nodes = [node, neighbor, new_node]
             subgraph = G.subgraph(sub_nodes).copy()
             # Verify connectedness
             if G.is_directed():
@@ -160,6 +180,22 @@ def random_sample_connected_subgraphs_size_3(G, num_samples):
     """
     return list(sample_connected_subgraphs_size_3(G, num_samples))
 
+def get_regulation_distribution(G):
+    """
+    Calculate the distribution of regulation types in the graph.
+
+    Parameters:
+    - G (networkx.Graph or networkx.DiGraph): The input graph.
+
+    Returns:
+    - dict: Counts of each regulation type.
+    """
+    regulation_counts = {}
+    for _, _, data in G.edges(data=True):
+        regulation = data.get('regulation', '')
+        regulation_counts[regulation] = regulation_counts.get(regulation, 0) + 1
+    return regulation_counts
+
 def custom_directed_double_edge_swap(G, nswap=10, max_tries=1000):
     """
     Perform a directed double edge swap to randomize the graph while preserving in-degree and out-degree sequences.
@@ -174,15 +210,17 @@ def custom_directed_double_edge_swap(G, nswap=10, max_tries=1000):
     """
     if not G.is_directed():
         raise nx.NetworkXError("Graph must be directed.")
-    
+
     G_random = G.copy()
     tries = 0
     swaps = 0
     edges = list(G_random.edges())
     num_edges = len(edges)
-    
+
     while swaps < nswap and tries < max_tries:
         tries += 1
+        if num_edges < 2:
+            break  # Not enough edges to swap
         # Randomly pick two distinct edges
         e1, e2 = random.sample(edges, 2)
         (a, b) = e1
@@ -210,38 +248,52 @@ def custom_directed_double_edge_swap(G, nswap=10, max_tries=1000):
 
     if swaps < nswap:
         logging.warning(f"Only performed {swaps} out of {nswap} desired directed edge swaps.")
-    
+
     return G_random
 
 def randomize_network(G, num_swaps=10):
     """
-    Randomize the network while preserving the degree sequence using double-edge swaps.
+    Randomize the network while preserving the degree sequence using double-edge swaps
+    and reassign regulation types based on the original distribution.
 
     Parameters:
-    - G (networkx.Graph): The input graph.
+    - G (networkx.Graph or networkx.DiGraph): The input graph.
     - num_swaps (int): Number of swap attempts per edge.
 
     Returns:
-    - networkx.Graph: Randomized graph.
+    - networkx.Graph or networkx.DiGraph: Randomized graph with reassigned regulation types.
     """
     G_random = G.copy()
     try:
-        logging.info("Randomizing network...")
-        if G.is_directed():
-            # Use custom directed edge swap
+        if G_random.is_directed():
+            logging.info("Randomizing network using custom directed double edge swap...")
             G_random = custom_directed_double_edge_swap(
                 G_random,
                 nswap=num_swaps * G_random.number_of_edges(),
                 max_tries=num_swaps * G_random.number_of_edges() * 10
             )
         else:
-            # For undirected graphs, use double_edge_swap
-            double_edge_swap(
+            logging.info("Randomizing network using NetworkX's double_edge_swap...")
+            total_swaps = num_swaps * G_random.number_of_edges()
+            nx.double_edge_swap(
                 G_random,
-                nswap=num_swaps * G_random.number_of_edges(),
-                max_tries=num_swaps * G_random.number_of_edges() * 10
+                nswap=total_swaps,
+                max_tries=total_swaps * 10,
+                seed=None  # Set a seed for reproducibility if desired
             )
         logging.info("Randomization complete.")
+
+        # Reassign regulation types based on original distribution
+        if G_random.is_directed():
+            regulation_distribution = get_regulation_distribution(G)
+            total_regulations = sum(regulation_distribution.values())
+            regulation_prob = {k: v / total_regulations for k, v in regulation_distribution.items()}
+            for u, v in G_random.edges():
+                G_random[u][v]['regulation'] = random.choices(
+                    population=list(regulation_prob.keys()),
+                    weights=list(regulation_prob.values()),
+                    k=1
+                )[0]
     except nx.NetworkXError as e:
         logging.error(f"Randomization failed: {e}")
     return G_random
@@ -261,7 +313,7 @@ def compute_statistics(real_counts, random_counts_list):
     stats_dict = {}
     p_values = []
     motifs = list(real_counts.keys())
-    
+
     # Collect p-values for multiple testing correction
     for motif in motifs:
         real_count = real_counts[motif]
@@ -278,13 +330,13 @@ def compute_statistics(real_counts, random_counts_list):
             'p_value': p_value
         }
         p_values.append(p_value)
-    
+
     # Multiple testing correction using Benjamini-Hochberg
     corrected = multipletests(p_values, method='fdr_bh')
     for i, motif in enumerate(motifs):
         stats_dict[motif]['p_value_corrected'] = corrected[1][i]
         stats_dict[motif]['significant'] = corrected[0][i]
-    
+
     logging.info("Statistical significance computation complete with multiple testing correction.")
     return stats_dict
 
@@ -301,11 +353,9 @@ def save_results(stats, size, network_name):
     df.index.name = 'motif'
     results_dir = './results'
     os.makedirs(results_dir, exist_ok=True)
-    # No timestamp
     results_file = os.path.join(results_dir, f'{network_name}_motif_stats_size_{size}.csv')
     df.to_csv(results_file)
     logging.info(f"Results saved to {results_file}")
-
 
 def count_motifs_parallel(subgraphs, network_type='directed', num_workers=None):
     """
@@ -339,6 +389,27 @@ def count_motifs_parallel(subgraphs, network_type='directed', num_workers=None):
     logging.info("Parallel motif counting complete.")
     return motif_counts_total
 
+def verify_degree_sequences(G_original, G_random):
+    """
+    Verify that the degree sequences match between the original and randomized networks.
+    """
+    if G_original.is_directed():
+        orig_in_deg = sorted(dict(G_original.in_degree()).values())
+        orig_out_deg = sorted(dict(G_original.out_degree()).values())
+        rand_in_deg = sorted(dict(G_random.in_degree()).values())
+        rand_out_deg = sorted(dict(G_random.out_degree()).values())
+        if orig_in_deg != rand_in_deg or orig_out_deg != rand_out_deg:
+            logging.warning("Degree sequences do not match after randomization.")
+        else:
+            logging.info("Degree sequences match between original and randomized networks.")
+    else:
+        orig_deg = sorted(dict(G_original.degree()).values())
+        rand_deg = sorted(dict(G_random.degree()).values())
+        if orig_deg != rand_deg:
+            logging.warning("Degree sequences do not match after randomization.")
+        else:
+            logging.info("Degree sequences match between original and randomized networks.")
+
 def main():
     setup_logging()
     
@@ -364,6 +435,10 @@ def main():
     G = load_network(args.network, network_type='directed' if args.directed else 'undirected', has_regulation=args.has_regulation)
     
     # Check connectivity and focus on the largest connected component
+    if G.number_of_nodes() == 0:
+        logging.error("The graph is empty. Exiting.")
+        return
+    
     if G.is_directed():
         if not nx.is_weakly_connected(G):
             logging.warning("The network is not weakly connected. Focusing on the largest weakly connected component.")
@@ -385,7 +460,13 @@ def main():
         # Implement similar efficient sampling for size 4 if needed
         logging.error("Currently, only size=3 motifs are supported with the efficient sampling method.")
         return
+    
+    # Debugging: Log the first few sampled subgraphs
+    for i, sg in enumerate(real_subgraphs[:10]):
+        logging.info(f"Sampled subgraph {i}: {sg.edges(data=True)}")
+    
     real_counts = count_motifs_parallel(real_subgraphs, 'directed' if G.is_directed() else 'undirected', num_workers=args.num_workers)
+    logging.info(f"Unique motifs in real network: {len(real_counts)}")
     logging.info("Motif counting in real network complete.")
     
     # Generate randomized networks and count motifs
@@ -394,6 +475,8 @@ def main():
     for i in range(1, args.num_random + 1):
         logging.info(f"Processing randomized network {i}/{args.num_random}...")
         randomized_G = randomize_network(G, num_swaps=10)  # Adjust num_swaps as needed
+        verify_degree_sequences(G, randomized_G)
+        
         # Check connectivity in randomized network
         if randomized_G.is_directed():
             if not nx.is_weakly_connected(randomized_G):
@@ -411,6 +494,11 @@ def main():
         # Count motifs in the randomized network
         logging.info(f"Sampling {args.num_samples} connected 3-node subgraphs from randomized network {i}...")
         rand_subgraphs = random_sample_connected_subgraphs_size_3(randomized_G, args.num_samples)
+        
+        # Debugging: Log the first few randomized sampled subgraphs
+        for j, sg in enumerate(rand_subgraphs[:2]):
+            logging.info(f"Randomized {i} - Sampled subgraph {j}: {sg.edges(data=True)}")
+        
         rand_counts = count_motifs_parallel(rand_subgraphs, 'directed' if randomized_G.is_directed() else 'undirected', num_workers=args.num_workers)
         random_counts_list.append(rand_counts)
         logging.info(f"Randomized network {i} complete.")

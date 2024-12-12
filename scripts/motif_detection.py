@@ -252,17 +252,6 @@ def custom_directed_double_edge_swap(G, nswap=10, max_tries=1000):
     return G_random
 
 def randomize_network(G, num_swaps=10):
-    """
-    Randomize the network while preserving the degree sequence using double-edge swaps
-    and reassign regulation types based on the original distribution.
-
-    Parameters:
-    - G (networkx.Graph or networkx.DiGraph): The input graph.
-    - num_swaps (int): Number of swap attempts per edge.
-
-    Returns:
-    - networkx.Graph or networkx.DiGraph: Randomized graph with reassigned regulation types.
-    """
     G_random = G.copy()
     try:
         if G_random.is_directed():
